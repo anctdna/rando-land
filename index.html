@@ -52,14 +52,8 @@
       padding: 14px;
       box-shadow: 0 6px 24px rgba(0,0,0,0.3);
     }
-    h1 {
-      font-size: 18px;
-      margin: 0 0 12px 0;
-      font-weight: 700;
-      letter-spacing: .2px;
-    }
+    h1 { font-size: 18px; margin: 0 0 12px 0; font-weight: 700; letter-spacing: .2px; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
     .field { margin-bottom: 10px; }
     label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
     input[type="number"], input[type="text"] {
@@ -178,10 +172,27 @@
     crossorigin="">
   </script>
   <script src="https://unpkg.com/leaflet-control-geocoder@2.4.0/dist/Control.Geocoder.js"></script>
+
+  <!-- d3-geo и topojson (для офлайн-проверки суши). Используем резервные CDN -->
   <script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/d3-geo@3/dist/d3-geo.min.js"></script>
 
   <script>
+    // ------------------------------
+    // Утилиты: таймауты и мелкое "уступание" UI
+    // ------------------------------
+    async function fetchWithTimeout(url, opts = {}) {
+      const { timeout = 10000, ...rest } = opts;
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), timeout);
+      try {
+        return await fetch(url, { signal: controller.signal, ...rest });
+      } finally {
+        clearTimeout(id);
+      }
+    }
+    const uiTick = () => new Promise(r => setTimeout(r, 0));
+
     // ------------------------------
     // Карта (Leaflet)
     // ------------------------------
@@ -194,7 +205,6 @@
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
     }).addTo(map);
 
-    // Поиск адресов (Nominatim)
     const geocoder = L.Control.geocoder({
       defaultMarkGeocode: false,
       placeholder: 'Поиск места…'
@@ -222,11 +232,11 @@
     const linkYandex = document.getElementById('link-yandex');
 
     const btnUseCenter = document.getElementById('btn-use-center');
+    theBtnGeolocate = document.getElementById ? document.getElementById('btn-geolocate') : null; // safety
     const btnGeolocate = document.getElementById('btn-geolocate');
     const btnGenerate = document.getElementById('btn-generate');
     const btnClear = document.getElementById('btn-clear');
 
-    // Сохраняем токен в localStorage, чтобы не вводить каждый раз
     tokenInput.value = localStorage.getItem('onwater_token') || '';
     tokenInput.addEventListener('change', () => {
       localStorage.setItem('onwater_token', tokenInput.value.trim());
@@ -239,22 +249,32 @@
     let radiusCircle = null;
     let lastPointMarker = null;
 
-    // Кэш результатов "вода/суша", чтобы экономить запросы
     const waterCache = new Map(); // key: lat.toFixed(4)+','+lon.toFixed(4)
 
     // Оффлайн слой суши (для быстрого фильтра "море/океан")
     let landGeo = null;
-    const landTopoUrl = 'https://cdn.jsdelivr.net/npm/world-atlas@2/land-50m.json';
+    const landTopoUrls = [
+      'https://cdn.jsdelivr.net/npm/world-atlas@2/land-50m.json',
+      'https://unpkg.com/world-atlas@2/land-50m.json',
+      'https://fastly.jsdelivr.net/npm/world-atlas@2/land-50m.json'
+    ];
 
     async function ensureLandLoaded() {
       if (landGeo) return;
-      try {
-        const res = await fetch(landTopoUrl);
-        const topo = await res.json();
-        landGeo = topojson.feature(topo, topo.objects.land);
-      } catch (e) {
-        console.warn('Не удалось загрузить офлайн-слой суши:', e);
+      for (const url of landTopoUrls) {
+        try {
+          const res = await fetchWithTimeout(url, { timeout: 10000 });
+          if (!res.ok) continue;
+          const topo = await res.json();
+          if (typeof topojson === 'undefined' || !topo.objects || !topo.objects.land) continue;
+          landGeo = topojson.feature(topo, topo.objects.land);
+          return;
+        } catch (e) {
+          console.warn('Не удалось загрузить офлайн-слой суши:', url, e.message || e);
+          // пробуем следующий CDN
+        }
       }
+      // Если не удалось — продолжим без офлайн-слоя (мягкий фолбэк)
     }
 
     // ------------------------------
@@ -352,15 +372,27 @@
         return;
       }
 
-      await ensureLandLoaded(); // чтобы офлайн-фильтр был готов при отсутствии токена
+      // Подготовим офлайн-слой, но не блокируем работу, если CDN недоступен
+      await ensureLandLoaded();
       status('Ищу точку на суше…');
+      await uiTick(); // отдать кадр UI, чтобы статус появился
 
       let found = null;
       for (let i = 1; i <= maxAttempts; i++) {
         const cand = randomPointOnCircle(center.lat, center.lng, radiusMeters);
-        const isLand = await isOnLand(cand.lat, cand.lng, token);
-        status(`Попытка ${i}/${maxAttempts}: ${isLand ? 'суша ✅' : 'вода ⛔️'}`);
+        status(`Проверка ${i}/${maxAttempts}…`);
+        await uiTick();
 
+        let isLand = false;
+        try {
+          isLand = await isOnLand(cand.lat, cand.lng, token);
+        } catch (e) {
+          console.warn('Ошибка проверки воды/суши:', e.message || e);
+          // Фолбэк — не блокируем процесс из-за ошибок
+          isLand = true;
+        }
+
+        status(`Попытка ${i}/${maxAttempts}: ${isLand ? 'суша ✅' : 'вода ⛔️'}`);
         if (isLand) {
           found = cand;
           break;
@@ -375,7 +407,6 @@
       if (lastPointMarker) map.removeLayer(lastPointMarker);
       lastPointMarker = L.marker([found.lat, found.lng], { title: 'Случайная точка' }).addTo(map);
 
-      // Если круг далеко — слегка подвинем карту
       if (!map.getBounds().contains([found.lat, found.lng])) {
         map.panTo([found.lat, found.lng]);
       }
@@ -388,7 +419,7 @@
       resultBox.style.display = '';
       coordsEl.textContent = `${fmt(lat)}, ${fmt(lng)}`;
       linkGMaps.href = `https://www.google.com/maps?q=${lat},${lng}`;
-      const ll = `${lng.toFixed(6)},${lat.toFixed(6)}`; // Яндекс ждет lon,lat
+      const ll = `${lng.toFixed(6)},${lat.toFixed(6)}`; // Яндекс ждёт lon,lat
       linkYandex.href = `https://yandex.ru/maps/?ll=${encodeURIComponent(ll)}&z=17&pt=${encodeURIComponent(ll)},pm2rdm`;
     }
 
@@ -396,40 +427,38 @@
     // Проверка воды
     // ------------------------------
     async function isOnLand(lat, lon, token) {
-      // Кэшируем с округлением до 4 знаков (~11 м), чтобы экономить запросы и ускорять повторные проверки
       const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
       if (waterCache.has(key)) return waterCache.get(key);
 
-      let result = false;
-
+      // 1) Если есть токен — пробуем OnWater с таймаутом
       if (token) {
         try {
-          result = await isOnLand_OnWater(lat, lon, token);
-          waterCache.set(key, result);
-          return result;
+          const viaOnWater = await isOnLand_OnWater(lat, lon, token, 8000);
+          waterCache.set(key, viaOnWater);
+          return viaOnWater;
         } catch (e) {
-          console.warn('OnWater недоступен, переключаемся на офлайн-проверку:', e);
-          // продолжим офлайн
+          console.warn('OnWater недоступен/медленный — офлайн-проверка:', e.message || e);
+          // Падаем в офлайн-проверку
         }
       }
 
-      // Оффлайн-проверка (по береговой линии): true если внутри суши, false если океан/море
-      if (landGeo) {
-        result = d3.geoContains(landGeo, [lon, lat]);
-        waterCache.set(key, result);
-        return result;
+      // 2) Оффлайн (моря/океаны). Проверяем, что d3 и слой суши есть.
+      if (landGeo && typeof d3 !== 'undefined' && d3.geoContains) {
+        const isLand = d3.geoContains(landGeo, [lon, lat]);
+        waterCache.set(key, isLand);
+        return isLand;
       }
 
-      // Если вообще ничего не загрузилось — пропустим фильтр, чтобы не блокировать
+      // 3) Фолбэк: если ничего не загрузилось — не блокируем генерацию
+      waterCache.set(key, true);
       return true;
     }
 
-    async function isOnLand_OnWater(lat, lon, token) {
+    async function isOnLand_OnWater(lat, lon, token, timeoutMs = 8000) {
       const url = `https://api.onwater.io/api/v1/results/${lat},${lon}?access_token=${encodeURIComponent(token)}`;
-      const res = await fetch(url);
-      if (!res.ok) throw new Error('OnWater API error ' + res.status);
+      const res = await fetchWithTimeout(url, { timeout: timeoutMs });
+      if (!res.ok) throw new Error('OnWater HTTP ' + res.status);
       const data = await res.json();
-      // API возвращает { water: true/false }
       return data && data.water === false;
     }
 
@@ -437,10 +466,10 @@
     // Геометрия/утилиты
     // ------------------------------
     function randomPointOnCircle(lat, lon, radiusMeters) {
-      const R = 6371000; // радиус Земли в метрах
+      const R = 6371000;
       const u = Math.random();
       const v = Math.random();
-      const w = radiusMeters * Math.sqrt(u); // равномерно по площади круга
+      const w = radiusMeters * Math.sqrt(u);
       const t = 2 * Math.PI * v;
 
       const lat1 = toRad(lat);
@@ -468,7 +497,6 @@
       statusEl.innerHTML = `<span class="${cls}">${msg}</span>`;
     }
 
-    // Инициализация радиуса
     drawRadius();
   </script>
 </body>
