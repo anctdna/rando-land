@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Генератор случайных координат (без воды)</title>
+
+  <!-- Leaflet -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <!-- Leaflet Geocoder -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet-control-geocoder@2.4.0/dist/Control.Geocoder.css"
+  />
+
+  <style>
+    :root {
+      --bg: #0f1221;
+      --panel: #171a2b;
+      --text: #e7e9f3;
+      --muted: #9aa3b2;
+      --accent: #4aa3ff;
+      --accent-2: #9bff9e;
+      --danger: #ff6b6b;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Arial, "Noto Sans", "Helvetica Neue";
+      background: linear-gradient(180deg,#0b0e1a,#0f1221);
+      color: var(--text);
+    }
+    .app {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 12px;
+      height: 100vh;
+      padding: 12px;
+    }
+    @media (max-width: 900px) {
+      .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 12px;
+      padding: 14px;
+      box-shadow: 0 6px 24px rgba(0,0,0,0.3);
+    }
+    h1 {
+      font-size: 18px;
+      margin: 0 0 12px 0;
+      font-weight: 700;
+      letter-spacing: .2px;
+    }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+    .field { margin-bottom: 10px; }
+    label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+    input[type="number"], input[type="text"] {
+      width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.12);
+      background: #0f1221; color: var(--text);
+      outline: none;
+    }
+    input::placeholder { color: #7d8798; }
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      gap: 8px; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.12);
+      background: #12162a; color: var(--text); cursor: pointer; user-select: none;
+      transition: transform .02s ease-in-out, background .2s;
+      text-decoration: none; text-align: center;
+    }
+    .btn:hover { background: #151a31; }
+    .btn:active { transform: translateY(1px); }
+    .btn.accent { background: #173356; border-color: #224a7f; color: #eaf3ff; }
+    .btn.green { background: #154a2d; border-color: #2b7a49; color: #e4ffe9; }
+    .btn.red { background: #522223; border-color: #7a2b2d; color: #ffe9e9; }
+    .muted { color: var(--muted); font-size: 13px; }
+    .status { font-size: 13px; line-height: 1.4; }
+    .pill {
+      display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 11px; background: #10142a; border: 1px solid rgba(255,255,255,0.08); color: var(--muted);
+    }
+    .ok { color: var(--accent-2); }
+    .warn { color: #ffd166; }
+    .bad { color: var(--danger); }
+    #map { width: 100%; height: calc(100vh - 24px); min-height: 360px; border-radius: 12px; overflow: hidden; }
+    .stack { display: grid; gap: 8px; }
+    .controls { display: grid; gap: 8px; }
+    .links { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .small { font-size: 12px; color: var(--muted); }
+    .divider { border-top: 1px solid rgba(255,255,255,0.08); margin: 10px 0; }
+    .kbd {
+      display: inline-block; border: 1px solid rgba(255,255,255,0.2); border-bottom-width: 3px;
+      border-radius: 6px; padding: 1px 6px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="panel">
+      <h1>Генератор случайных координат</h1>
+
+      <div class="stack">
+        <div class="field">
+          <label>Как задать центр</label>
+          <div class="row">
+            <button id="btn-use-center" class="btn">Взять центр карты</button>
+            <button id="btn-geolocate" class="btn">Моё местоположение</button>
+          </div>
+          <div class="small">Можно также кликнуть по карте — точка клика станет центром.</div>
+        </div>
+
+        <div class="row">
+          <div class="field">
+            <label>Радиус (км)</label>
+            <input id="radius-km" type="number" min="0.1" step="0.1" value="2" />
+          </div>
+          <div class="field">
+            <label>Макс. попыток</label>
+            <input id="max-attempts" type="number" min="1" step="1" value="120" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Токен OnWater (опционально, для точной проверки воды)</label>
+          <input id="onwater-token" type="text" placeholder="вставьте токен, если есть" />
+          <div class="small">
+            Без токена работает офлайн‑фильтр береговой линии (моря/океаны). С токеном — исключаются и озёра/реки.
+          </div>
+        </div>
+
+        <div class="controls">
+          <button id="btn-generate" class="btn accent">Сгенерировать точку</button>
+          <button id="btn-clear" class="btn red">Сбросить метки</button>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="status" id="status">
+          Готово. Выберите центр и нажмите «Сгенерировать точку».
+        </div>
+
+        <div class="divider"></div>
+
+        <div id="result" class="stack" style="display:none;">
+          <div><span class="pill">Результат</span></div>
+          <div class="field">
+            <label>Широта, долгота</label>
+            <div id="coords" class="kbd"></div>
+          </div>
+          <div class="links">
+            <a id="link-gmaps" class="btn" target="_blank" rel="noopener">Открыть в Google Maps</a>
+            <a id="link-yandex" class="btn" target="_blank" rel="noopener">Открыть в Яндекс.Картах</a>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+        <div class="small">
+          Поиск адресов: панель в левом верхнем углу карты. Источник карты — OpenStreetMap. Пожалуйста, не создавайте чрезмерную нагрузку.
+        </div>
+      </div>
+    </aside>
+
+    <main class="panel" style="padding:0;">
+      <div id="map"></div>
+    </main>
+  </div>
+
+  <!-- libs -->
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin="">
+  </script>
+  <script src="https://unpkg.com/leaflet-control-geocoder@2.4.0/dist/Control.Geocoder.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/d3-geo@3/dist/d3-geo.min.js"></script>
+
+  <script>
+    // ------------------------------
+    // Карта (Leaflet)
+    // ------------------------------
+    const map = L.map('map', { zoomControl: true });
+    const defaultCenter = [55.751244, 37.618423]; // Москва по умолчанию
+    map.setView(defaultCenter, 12);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
+    }).addTo(map);
+
+    // Поиск адресов (Nominatim)
+    const geocoder = L.Control.geocoder({
+      defaultMarkGeocode: false,
+      placeholder: 'Поиск места…'
+    })
+    .on('markgeocode', function(e) {
+      const bbox = e.geocode.bbox;
+      const bounds = L.latLngBounds(bbox.getSouthEast(), bbox.getNorthWest());
+      map.fitBounds(bounds);
+      setCenter(bounds.getCenter());
+    })
+    .addTo(map);
+
+    L.control.scale({imperial: false}).addTo(map);
+
+    // ------------------------------
+    // Элементы UI
+    // ------------------------------
+    const radiusInput = document.getElementById('radius-km');
+    const maxAttemptsInput = document.getElementById('max-attempts');
+    const tokenInput = document.getElementById('onwater-token');
+    const statusEl = document.getElementById('status');
+    const resultBox = document.getElementById('result');
+    const coordsEl = document.getElementById('coords');
+    const linkGMaps = document.getElementById('link-gmaps');
+    const linkYandex = document.getElementById('link-yandex');
+
+    const btnUseCenter = document.getElementById('btn-use-center');
+    const btnGeolocate = document.getElementById('btn-geolocate');
+    const btnGenerate = document.getElementById('btn-generate');
+    const btnClear = document.getElementById('btn-clear');
+
+    // Сохраняем токен в localStorage, чтобы не вводить каждый раз
+    tokenInput.value = localStorage.getItem('onwater_token') || '';
+    tokenInput.addEventListener('change', () => {
+      localStorage.setItem('onwater_token', tokenInput.value.trim());
+    });
+
+    // ------------------------------
+    // Служебное состояние
+    // ------------------------------
+    let centerMarker = null;
+    let radiusCircle = null;
+    let lastPointMarker = null;
+
+    // Кэш результатов "вода/суша", чтобы экономить запросы
+    const waterCache = new Map(); // key: lat.toFixed(4)+','+lon.toFixed(4)
+
+    // Оффлайн слой суши (для быстрого фильтра "море/океан")
+    let landGeo = null;
+    const landTopoUrl = 'https://cdn.jsdelivr.net/npm/world-atlas@2/land-50m.json';
+
+    async function ensureLandLoaded() {
+      if (landGeo) return;
+      try {
+        const res = await fetch(landTopoUrl);
+        const topo = await res.json();
+        landGeo = topojson.feature(topo, topo.objects.land);
+      } catch (e) {
+        console.warn('Не удалось загрузить офлайн-слой суши:', e);
+      }
+    }
+
+    // ------------------------------
+    // Установка центра и радиуса
+    // ------------------------------
+    function setCenter(latlng) {
+      if (centerMarker) {
+        centerMarker.setLatLng(latlng);
+      } else {
+        centerMarker = L.marker(latlng, { draggable: true, title: 'Центр поиска' }).addTo(map);
+        centerMarker.on('dragend', () => {
+          drawRadius();
+        });
+      }
+      drawRadius();
+      status(`Центр задан: ${fmt(latlng.lat)}, ${fmt(latlng.lng)}`);
+    }
+
+    function getCenter() {
+      return centerMarker ? centerMarker.getLatLng() : map.getCenter();
+    }
+
+    function drawRadius() {
+      const latlng = getCenter();
+      const meters = kmToM(radiusInput.value);
+      if (radiusCircle) {
+        radiusCircle.setLatLng(latlng);
+        radiusCircle.setRadius(meters);
+      } else {
+        radiusCircle = L.circle(latlng, {
+          radius: meters,
+          color: '#4aa3ff',
+          weight: 1.2,
+          fillColor: '#4aa3ff',
+          fillOpacity: 0.07
+        }).addTo(map);
+      }
+    }
+
+    radiusInput.addEventListener('change', drawRadius);
+
+    map.on('click', (e) => {
+      setCenter(e.latlng);
+    });
+
+    btnUseCenter.addEventListener('click', () => {
+      setCenter(map.getCenter());
+      map.panTo(getCenter());
+    });
+
+    btnGeolocate.addEventListener('click', () => {
+      if (!('geolocation' in navigator)) {
+        status('Геолокация недоступна в браузере', 'bad');
+        return;
+      }
+      status('Определяем местоположение…');
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const latlng = L.latLng(pos.coords.latitude, pos.coords.longitude);
+          setCenter(latlng);
+          map.setView(latlng, 14);
+          status('Местоположение установлено', 'ok');
+        },
+        (err) => {
+          status('Не удалось определить местоположение: ' + err.message, 'bad');
+        },
+        { enableHighAccuracy: true, timeout: 10000 }
+      );
+    });
+
+    btnClear.addEventListener('click', () => {
+      if (lastPointMarker) {
+        map.removeLayer(lastPointMarker);
+        lastPointMarker = null;
+      }
+      resultBox.style.display = 'none';
+      status('Метки очищены.');
+    });
+
+    // ------------------------------
+    // Генерация точки
+    // ------------------------------
+    btnGenerate.addEventListener('click', async () => {
+      const center = getCenter();
+      const radiusMeters = kmToM(radiusInput.value);
+      const maxAttempts = Math.max(1, Number(maxAttemptsInput.value) || 1);
+      const token = (tokenInput.value || '').trim();
+
+      if (!center) {
+        status('Сначала задайте центр (клик по карте или кнопка «Взять центр карты»).', 'bad');
+        return;
+      }
+      if (!(radiusMeters > 0)) {
+        status('Неверный радиус.', 'bad');
+        return;
+      }
+
+      await ensureLandLoaded(); // чтобы офлайн-фильтр был готов при отсутствии токена
+      status('Ищу точку на суше…');
+
+      let found = null;
+      for (let i = 1; i <= maxAttempts; i++) {
+        const cand = randomPointOnCircle(center.lat, center.lng, radiusMeters);
+        const isLand = await isOnLand(cand.lat, cand.lng, token);
+        status(`Попытка ${i}/${maxAttempts}: ${isLand ? 'суша ✅' : 'вода ⛔️'}`);
+
+        if (isLand) {
+          found = cand;
+          break;
+        }
+      }
+
+      if (!found) {
+        status('Не удалось найти точку на суше в заданном радиусе. Увеличьте радиус или сместите центр.', 'warn');
+        return;
+      }
+
+      if (lastPointMarker) map.removeLayer(lastPointMarker);
+      lastPointMarker = L.marker([found.lat, found.lng], { title: 'Случайная точка' }).addTo(map);
+
+      // Если круг далеко — слегка подвинем карту
+      if (!map.getBounds().contains([found.lat, found.lng])) {
+        map.panTo([found.lat, found.lng]);
+      }
+
+      showResult(found.lat, found.lng);
+      status('Готово! Точка на суше найдена.', 'ok');
+    });
+
+    function showResult(lat, lng) {
+      resultBox.style.display = '';
+      coordsEl.textContent = `${fmt(lat)}, ${fmt(lng)}`;
+      linkGMaps.href = `https://www.google.com/maps?q=${lat},${lng}`;
+      const ll = `${lng.toFixed(6)},${lat.toFixed(6)}`; // Яндекс ждет lon,lat
+      linkYandex.href = `https://yandex.ru/maps/?ll=${encodeURIComponent(ll)}&z=17&pt=${encodeURIComponent(ll)},pm2rdm`;
+    }
+
+    // ------------------------------
+    // Проверка воды
+    // ------------------------------
+    async function isOnLand(lat, lon, token) {
+      // Кэшируем с округлением до 4 знаков (~11 м), чтобы экономить запросы и ускорять повторные проверки
+      const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
+      if (waterCache.has(key)) return waterCache.get(key);
+
+      let result = false;
+
+      if (token) {
+        try {
+          result = await isOnLand_OnWater(lat, lon, token);
+          waterCache.set(key, result);
+          return result;
+        } catch (e) {
+          console.warn('OnWater недоступен, переключаемся на офлайн-проверку:', e);
+          // продолжим офлайн
+        }
+      }
+
+      // Оффлайн-проверка (по береговой линии): true если внутри суши, false если океан/море
+      if (landGeo) {
+        result = d3.geoContains(landGeo, [lon, lat]);
+        waterCache.set(key, result);
+        return result;
+      }
+
+      // Если вообще ничего не загрузилось — пропустим фильтр, чтобы не блокировать
+      return true;
+    }
+
+    async function isOnLand_OnWater(lat, lon, token) {
+      const url = `https://api.onwater.io/api/v1/results/${lat},${lon}?access_token=${encodeURIComponent(token)}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('OnWater API error ' + res.status);
+      const data = await res.json();
+      // API возвращает { water: true/false }
+      return data && data.water === false;
+    }
+
+    // ------------------------------
+    // Геометрия/утилиты
+    // ------------------------------
+    function randomPointOnCircle(lat, lon, radiusMeters) {
+      const R = 6371000; // радиус Земли в метрах
+      const u = Math.random();
+      const v = Math.random();
+      const w = radiusMeters * Math.sqrt(u); // равномерно по площади круга
+      const t = 2 * Math.PI * v;
+
+      const lat1 = toRad(lat);
+      const lon1 = toRad(lon);
+      const angDist = w / R;
+
+      const lat2 = Math.asin(Math.sin(lat1) * Math.cos(angDist) + Math.cos(lat1) * Math.sin(angDist) * Math.cos(t));
+      const lon2 = lon1 + Math.atan2(Math.sin(t) * Math.sin(angDist) * Math.cos(lat1),
+                                      Math.cos(angDist) - Math.sin(lat1) * Math.sin(lat2));
+      return { lat: toDeg(lat2), lng: normalizeLon(toDeg(lon2)) };
+    }
+
+    function kmToM(km) { return Number(km) * 1000; }
+    function toRad(d) { return d * Math.PI / 180; }
+    function toDeg(r) { return r * 180 / Math.PI; }
+    function normalizeLon(lon) {
+      let x = lon;
+      while (x < -180) x += 360;
+      while (x > 180) x -= 360;
+      return x;
+    }
+    function fmt(x) { return Number(x).toFixed(6); }
+    function status(msg, kind) {
+      const cls = kind === 'ok' ? 'ok' : kind === 'warn' ? 'warn' : kind === 'bad' ? 'bad' : 'muted';
+      statusEl.innerHTML = `<span class="${cls}">${msg}</span>`;
+    }
+
+    // Инициализация радиуса
+    drawRadius();
+  </script>
+</body>
+</html>
