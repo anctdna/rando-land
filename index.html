@@ -423,38 +423,89 @@
       linkYandex.href = `https://yandex.ru/maps/?ll=${encodeURIComponent(ll)}&z=17&pt=${encodeURIComponent(ll)},pm2rdm`;
     }
 
-    // ------------------------------
-    // Проверка воды
-    // ------------------------------
-    async function isOnLand(lat, lon, token) {
-      const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
-      if (waterCache.has(key)) return waterCache.get(key);
+// ------------------------------
+// Проверка воды
+// ------------------------------
+function parseRapidApiToken(token) {
+  // Формат: rapidapi:KEY[@HOST]
+  const m = token.match(/^rapidapi:([^@]+)(?:@(.+))?$/i);
+  if (!m) return null;
+  return { key: m[1], host: m[2] || 'isitwater.p.rapidapi.com' };
+}
 
-      // 1) Если есть токен — пробуем OnWater с таймаутом
-      if (token) {
-        try {
-          const viaOnWater = await isOnLand_OnWater(lat, lon, token, 8000);
-          waterCache.set(key, viaOnWater);
-          return viaOnWater;
-        } catch (e) {
-          console.warn('OnWater недоступен/медленный — офлайн-проверка:', e.message || e);
-          // Падаем в офлайн-проверку
-        }
+async function isOnLand(lat, lon, token) {
+  const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
+  if (waterCache.has(key)) return waterCache.get(key);
+
+  // 1) Если токен есть — сначала пробуем онлайн‑провайдер
+  if (token) {
+    const rp = parseRapidApiToken(token);
+    if (rp) {
+      try {
+        const viaRapid = await isOnLand_IsItWaterRapidAPI(lat, lon, rp.key, rp.host, 8000);
+        waterCache.set(key, viaRapid);
+        return viaRapid;
+      } catch (e) {
+        console.warn('RapidAPI IsItWater недоступен/ошибка:', e.message || e);
       }
-
-      // 2) Оффлайн (моря/океаны). Проверяем, что d3 и слой суши есть.
-      if (landGeo && typeof d3 !== 'undefined' && d3.geoContains) {
-        const isLand = d3.geoContains(landGeo, [lon, lat]);
-        waterCache.set(key, isLand);
-        return isLand;
+    } else {
+      try {
+        const viaOnWater = await isOnLand_OnWater(lat, lon, token, 8000);
+        waterCache.set(key, viaOnWater);
+        return viaOnWater;
+      } catch (e) {
+        console.warn('OnWater недоступен/ошибка:', e.message || e);
       }
-
-      // 3) Фолбэк: если ничего не загрузилось — не блокируем генерацию
-      waterCache.set(key, true);
-      return true;
     }
+  }
 
-    async function isOnLand_OnWater(lat, lon, token, timeoutMs = 8000) {
+  // 2) Оффлайн-проверка (моря/океаны), если d3/слой суши доступны
+  if (landGeo && typeof d3 !== 'undefined' && d3.geoContains) {
+    const isLand = d3.geoContains(landGeo, [lon, lat]);
+    waterCache.set(key, isLand);
+    return isLand;
+  }
+
+  // 3) Фолбэк — не блокируем генерацию
+  waterCache.set(key, true);
+  return true;
+}
+
+async function isOnLand_OnWater(lat, lon, token, timeoutMs = 8000) {
+  const url = `https://api.onwater.io/api/v1/results/${lat},${lon}?access_token=${encodeURIComponent(token)}`;
+  const res = await fetchWithTimeout(url, { timeout: timeoutMs });
+  if (!res.ok) throw new Error('OnWater HTTP ' + res.status);
+  const data = await res.json();
+  // Ожидаем { water: true/false }
+  return data && data.water === false;
+}
+
+async function isOnLand_IsItWaterRapidAPI(lat, lon, rapidKey, rapidHost = 'isitwater.p.rapidapi.com', timeoutMs = 8000) {
+  // На RapidAPI смотрите во вкладке Endpoints точные параметры.
+  // Для isitwater обычно так:
+  const url = `https://${rapidHost}/?latitude=${lat}&longitude=${lon}`;
+
+  const res = await fetchWithTimeout(url, {
+    headers: {
+      'X-RapidAPI-Key': rapidKey,
+      'X-RapidAPI-Host': rapidHost
+    },
+    timeout: timeoutMs
+  });
+  if (!res.ok) throw new Error('RapidAPI HTTP ' + res.status);
+  const data = await res.json();
+
+  // Разные провайдеры на RapidAPI отдают поля по-разному — обрабатываем несколько вариантов:
+  const water = (typeof data.water === 'boolean') ? data.water
+              : (typeof data.isWater === 'boolean') ? data.isWater
+              : (typeof data.is_water === 'boolean') ? data.is_water
+              : (data.result === true ? true : false);
+
+  // Возвращаем true, если точка на суше
+  return water === false;
+}
+
+async function isOnLand_OnWater(lat, lon, token, timeoutMs = 8000) {
       const url = `https://api.onwater.io/api/v1/results/${lat},${lon}?access_token=${encodeURIComponent(token)}`;
       const res = await fetchWithTimeout(url, { timeout: timeoutMs });
       if (!res.ok) throw new Error('OnWater HTTP ' + res.status);
@@ -501,3 +552,4 @@
   </script>
 </body>
 </html>
+
